@@ -1,0 +1,947 @@
+---
+title: "R Modeling Notebook for Practicum Project, 2023"
+output: html_notebook
+---
+Social Determinants of Health, Air Quality, and the Prediction of Respiratory Disease
+
+```{r}
+#Load necessarily libraries, set seed, read in data, etc. 
+
+#Load libraries
+library(MASS)
+library(xgboost)
+library(writexl)
+library(fitdistrplus)
+library(nortest)
+library(ggplot2)
+library(broom)
+library(corrplot)
+library(randomForest)
+library(olsrr)
+library(mixtools)
+library(glmnet)
+library(stats)
+library(caret)
+library("FactoMineR")
+library(factoextra)
+library(dplyr)
+library(rpart) #for fitting decision trees
+library(rpart.plot)
+library(ClusterR)
+
+#Set Seed
+SEED = 10
+set.seed(SEED)
+
+#Read in data
+DF_Total <-read.csv("Final_DF_For_Modeling.csv", header=TRUE)
+DF_Total
+#Drop contextual variables like fips codes or names and varaibles determined to be highly correlated by VIF and heatmap
+#
+DF <- subset(DF_Total, select = -c(CountyFips, County_Name_Short, State_Accnym, State_Long, County_Long, E_HH, E_HU, Number.of.business.establishments,Air.Quality.Bill.Count..current..recent..and.prior..80.percent.match.and.above.for..air.quality., Percent.Properties.Low.Fire.Risk, Percent_Under_5,Percent_5_to_14,Percent_15_to_24,Percent_25_to_34,Percent_35_to_44, Percent_45_to_54, Percent_55_to_64, Percent_65_to_74, Percent_75_and_Up, Male.2022...of.Pop.))
+
+#Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer
+
+#Convert type (some were char) after stripping out the percent sign 
+#aslo had to manually remove a couple "#DIV/0!" in excel because they should have been zeros
+
+#Sum Medium or high fire risk properties and drop individual columns
+DF$Percent.Properties.Medium.Or.High.Fire.Risk <- DF$Percent.Properties.High.Fire.Risk+DF$Percent.Properties.Medium.Fire.Risk
+
+DF <- subset(DF, select = -c(Percent.Properties.Medium.Fire.Risk, Percent.Properties.High.Fire.Risk))
+
+DF[] <- lapply(DF, function(x) as.numeric(gsub("%", "", x)))
+
+#checking for NA, there are none
+#summary(is.na(DF))
+
+
+#Scale data, put col names back, and then shift so between 0 and 1 (this is needed for PCA)
+
+DF_Scaled_1 <- scale(DF, center=TRUE, scale=TRUE)
+DF_Scaled1 <- as.data.frame(DF_Scaled_1)
+colnames(DF_Scaled1) <- colnames(DF)
+DF_Scaled <- (DF_Scaled1 - min(DF_Scaled1)) / (max(DF_Scaled1) - min(DF_Scaled1))
+
+DF_Scaled_Without_Predictors <- subset(DF_Scaled, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+scaleList <- list(scale = attr(DF_Scaled_1, "scaled:scale"),
+    center = attr(DF_Scaled_1, "scaled:center"))
+
+```
+
+
+```{r}
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+
+Helpful References:
+https://www.statology.org/test-for-normality-in-r/
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3693611/
+https://www.statology.org/shapiro-wilk-test-r/
+https://towardsdatascience.com/your-data-isnt-normal-54fe98b1f322
+https://stats.stackexchange.com/questions/232011/ties-should-not-be-present-in-one-sample-kolmgorov-smirnov-test-in-r
+
+https://cran.r-project.org/web/packages/olsrr/vignettes/intro.html
+https://www.statology.org/ridge-regression-in-r/
+
+Kolmogorov-Smirnov Test:
+If the p-value is below 0.05 then it indicates the data isn't normally distributed. If it is above 0.05 then it indicates a normal distribution.
+Unfortunatley not a great way to test for normalacy
+
+```{r}
+DF_No_Predictors <- subset(DF, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+Predictors <- subset(DF, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+DF_Linear_Regression <- scale(DF_No_Predictors, center=TRUE, scale=TRUE)
+colnames(DF_Linear_Regression) <- colnames(DF_No_Predictors)
+
+DF_Lin <- cbind(DF_Linear_Regression, Predictors)
+
+set.seed(123)
+#training test
+n <- nrow(DF)
+sample_indices <- sample(1:n, size = n, replace = FALSE)
+train_size <- round(0.7 * n)
+test_size <- n - train_size
+train_data_Lin <- DF_Lin[sample_indices[1:train_size], ]
+test_data_Lin <- DF_Lin[sample_indices[(train_size + 1):n], ]
+
+train <-subset(train_data_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_response <- subset(train_data_Lin, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test <- subset(test_data_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test_response <- subset(test_data_Lin, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+train_data_CL_COPD <-subset(train_data_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_data_CL_PA <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_data_CL_AA <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer))
+train_data_CL_LC <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Adult.Asthma))
+train_data_CL_CLD <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+#check for normal distribution of residuals of all possible response variables
+
+
+all_data_COPD <-subset(DF_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+all_data_PA <-subset(DF_Lin, select = -c(Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+all_data_AA <-subset(DF_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer))
+all_data_LC <-subset(DF_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Adult.Asthma))
+all_data_CLD <-subset(DF_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+
+```
+
+
+```{r}
+
+#og training and test r-squared and rmse
+
+PA_OG <- lm(train_data_CL_PA$Prevalence.Pediatric.Asthma~., data = train_data_CL_PA)
+summary(PA_OG)
+predictions <- predict(PA_OG, newdata = test)
+RMSE(predictions,test_response$Prevalence.Pediatric.Asthma)
+
+AA_OG <-lm(train_data_CL_AA$Prevalence.Adult.Asthma~., data = train_data_CL_AA)
+summary(AA_OG)
+predictions <- predict(AA_OG, newdata = test)
+RMSE(predictions,test_response$Prevalence.Adult.Asthma)
+
+COPD_OG <- lm(train_data_CL_COPD$Prevalence.COPD~., data = train_data_CL_COPD)
+summary(COPD_OG)
+predictions <- predict(COPD_OG, newdata = test)
+RMSE(predictions,test_response$Prevalence.COPD)
+
+CLD_OG <- lm(train_data_CL_CLD$Prevalence.Adult.Chronic.Lung.Disease~., data = train_data_CL_CLD)
+summary(CLD_OG)
+predictions <- predict(CLD_OG, newdata = test)
+RMSE(predictions,test_response$Prevalence.Adult.Chronic.Lung.Disease)
+
+COPD_OG_transformed <- lm(log(train_data_CL_COPD$Prevalence.COPD)^2~., data = train_data_CL_COPD)
+summary(COPD_OG_transformed)
+predictions <- predict(COPD_OG_transformed, newdata = test)
+val <- exp(sqrt(predictions))
+RMSE(val,test_response$Prevalence.COPD)
+
+```
+
+
+
+
+
+```{r}
+#Assumption check
+PA <- lm(all_data_PA$Prevalence.Pediatric.Asthma~., data = all_data_PA)
+AA <-lm(all_data_AA$Prevalence.Adult.Asthma~., data = all_data_AA)
+COPD <- lm(all_data_COPD$Prevalence.COPD~., data = all_data_COPD)
+CLD <- lm(all_data_CLD$Prevalence.Adult.Chronic.Lung.Disease~., data = all_data_CLD)
+LC <- lm(all_data_LC$Prevalence.Lung.Cancer~., data = all_data_LC)
+
+### Histograms
+
+hist(PA$residuals, col= "darkblue", nclass = 15, main = "Pediatric Asthma Residual Distribution") 
+hist(AA$residuals, col="yellow", main = "Adult Asthma Residual Distribution") 
+hist(COPD$residuals, col= "darkgreen", main = "COPD Residual Distribution") 
+hist(CLD$residuals, col= "darkorange", main = "Adult Chronic Lung Disease Residual Distribution") 
+hist(LC$residuals, col= "lightblue", main = "Lung Cancer Residual Distribution") 
+
+
+####QQ Plots
+qqnorm(PA$residuals, col= "darkblue", main='Pediatric Asthma Residual Distribution')
+qqline(PA$residuals)
+qqnorm(AA$residuals, col="Gold",main='Adult Asthma Residual Distribution')
+qqline(AA$residuals)
+qqnorm(COPD$residuals, col= "darkgreen",main='COPD Residual Distribution')
+qqline(COPD$residuals)
+qqnorm(CLD$residuals, col= "darkorange",main='Adult Chronic Lung Disease Residual Distribution')
+qqline(CLD$residuals)
+qqnorm(LC$residuals, col= "lightblue",main='Lung Cancer Residual Distribution')
+qqline(LC$residuals)
+
+
+#ggplot(data=DF_Scaled, aes(x=Lin_reg_assump$fitted.values, y=Lin_reg_assump$residuals)) + #geom_point(alpha=I(0.4),color='darkorange') +
+#xlab('Fitted Values') +
+#ylab('Residuals') +
+#ggtitle('COPD Residual Plot') + geom_hline(yintercept=0)
+
+
+#normal_data <- rnorm(200)
+
+
+##Cullen and Frey Graph
+
+descdist(PA$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "darkblue", obs.pch = 16, boot.col = "orange")
+descdist(AA$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "yellow", obs.pch = 16, boot.col = "orange")
+descdist(COPD$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "darkgreen", obs.pch = 16, boot.col = "orange")
+descdist(CLD$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "darkorange", obs.pch = 16, boot.col = "orange")
+descdist(LC$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "lightblue", obs.pch = 16, boot.col = "orange")
+
+
+#uncorrelated errors and constant variance checks
+ggplot(data=all_data_PA, aes(x=PA$fitted.values, y=PA$residuals)) + geom_point(alpha=I(0.4),color='darkblue') +
+xlab('Fitted Values') + ylab('Residuals') + ggtitle('Pediatric Asthma Residual Plot') + geom_hline(yintercept=0)
+
+
+###another way to do cooks distance
+#plot(AA, 4)
+###For future reference a good way to get diagnostic plots quickly
+#ols_plot_diagnostics(COPD)
+```
+
+
+```{r}
+###Cook's Distance
+
+plot(PA, 5)
+
+
+cooksd <- cooks.distance(PA)
+# Plot
+plot(cooksd, pch = 19, type = "h", main = "Cook's Distance PA")
+
+# Higher than 0.5 is worth looking at, higher than 1 is very high
+high_cooksd_rows <- which(cooksd > .2)
+
+# Trace back to original county and state to look up manually (Loving and Kenedy chosen as examples)
+print(DF_Total[high_cooksd_rows, ])
+
+###PA, AA, COPD, CLD, LC
+```
+
+
+```{r}
+#Get a pdf image of a correlation heat map for variables 
+Get_Correlations <- cor(DF_Scaled)
+pdf("correlation_plot.pdf", width = 10, height = 10)  # Adjust width and height as needed
+
+# Create the correlation plot (heatmap)
+corrplot(Get_Correlations, method = "color", type = "lower", order = "hclust", tl.cex = 0.6, tl.col = "black")
+dev.off()
+
+#multicolinearity check
+multicollin <- ols_coll_diag(AA)
+multicollin$vif_t
+
+multicollin$vif_t
+
+write.csv(multicollin$vif_t, file = "vif.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+### Model Transformations
+### did not help except for COPD
+
+##Lung Cancer attempt
+log_y <- (DF_Lin$Prevalence.Lung.Cancer)^2
+
+# Code to calculate lambda
+# Extract optimal lambda
+#^all done on fully scaled data to avoid negative values
+
+LC2 <- lm(log_y~., data = all_data_LC)
+qqnorm(LC2$residuals, main='Lung Cancer Transformed')
+qqline(LC2$residuals)
+
+
+### Transformation for COPD and PA
+
+log_y <- log(DF_Lin$Prevalence.Pediatric.Asthma)^2
+
+norespon <- subset(DF_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+  
+PA2 <- lm(log_y~., data = norespon)
+qqnorm(PA2$residuals, main='COPD Transformed')
+qqline(PA2$residuals)
+
+
+descdist(PA2$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "darkblue", obs.pch = 16, boot.col = "orange")
+############
+
+log_y <- log(DF_Lin$Prevalence.COPD)^2
+
+norespon <- subset(DF_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+  
+COPD2 <- lm(log_y~., data = norespon)
+qqnorm(COPD2$residuals, main='COPD Transformed')
+qqline(COPD2$residuals)
+
+descdist(COPD2$residuals, discrete = FALSE, boot = NULL, method = "unbiased", graph = TRUE, obs.col = "darkgreen", obs.pch = 16, boot.col = "orange")
+
+```
+
+
+"Note that setting alpha equal to 1 is equivalent to using Lasso Regression and setting alpha to some value between 0 and 1 is equivalent to using an elastic net."
+https://www.statology.org/ridge-regression-in-r/
+
+
+```{r}
+
+
+####Variable selection
+
+#Originally 34 variables
+
+#backward/forward
+backward_vs <- step(COPD, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_vs), "term.labels")
+new_data_selected <- DF_Scaled[, selected_variables]
+# Use selected variables in a new modeling attempt to see R squared improvement
+new_model <- lm((log(DF_Scaled$Prevalence.COPD))^2 ~ ., data = new_data_selected)
+summary(new_model)
+
+
+
+
+# Extract all variable names from your data frame
+all_variables <- colnames(DF_Scaled_Without_Predictors)
+
+# Identify variables not selected
+not_selected_variables <- setdiff(all_variables, selected_variables)
+
+# List the variables that were not selected
+cat("Number of variables selected:", length(selected_variables), "\n")
+cat("Variables not selected:", not_selected_variables, "\n")
+
+#########Lasso/Ridge/Elastic
+
+set.seed(10)
+#when alpha 1, lasso, check if reduces number of var
+# Fit a Ridge regression model with cross-validation
+X_matrix <- as.matrix(norespon)
+#Y_matrix <- as.matrix(((log(DF_Scaled$Prevalence.COPD))^2))
+Y_matrix <- as.matrix(DF_Lin$Prevalence.Adult.Asthma)
+#fit ridge regression model
+model <- glmnet(X_matrix, Y_matrix, alpha = 0)
+#view summary of model
+summary(model)
+#perform k-fold cross-validation to find optimal lambda value
+cv_model <- cv.glmnet(X_matrix, Y_matrix, alpha = 0)
+#find optimal lambda value that minimizes test MSE
+best_lambda <- cv_model$lambda.min
+#produce plot of test MSE by lambda value
+plot(cv_model) 
+#find coefficients of best model
+best_model <- glmnet(X_matrix, Y_matrix, alpha = 0, lambda = best_lambda)
+coef(best_model)
+y_predicted <- predict(model, s = best_lambda, newx = X_matrix)
+#find SST and SSE
+sst <- sum((Y_matrix - mean(Y_matrix))^2)
+sse <- sum((y_predicted - Y_matrix)^2)
+#find R-Squared
+rsq <- 1 - sse/sst
+rsq
+
+
+
+
+```
+
+SHAP
+https://cran.r-project.org/web/packages/shapr/vignettes/understanding_shapr.html
+
+
+https://www.datacamp.com/tutorial/pca-analysis-r
+
+```{r}
+###PCA
+
+data.pca <- princomp(DF_Scaled_Without_Predictors)
+summary(data.pca)
+data.pca$loadings[, 1:2]
+data.pca$loadings
+
+fviz_eig(data.pca, addlabels = TRUE)
+
+
+fviz_pca_var(data.pca, col.var = "black", )
+
+fviz_pca_var(data.pca, col.var = "cos2",
+            gradient.cols = c("black", "orange", "green"),
+            repel = TRUE)
+
+fviz_cos2(data.pca, choice = "var", axes = 1:3)
+
+
+
+
+set.seed(10)
+
+# Perform PCA on the predictors
+predictors <- as.matrix(DF_Scaled_Without_Predictors)
+pca_result <- prcomp(predictors, center = TRUE, scale = TRUE)
+
+Y <- as.matrix(DF_Scaled$Prevalence.Adult.Chronic.Lung.Disease)
+
+# Extract the principal components
+principal_components <- pca_result$x
+# Combine the principal components and the response variable into a new data frame
+pca_data_frame <- data.frame(
+  PC1 = principal_components[, 1],
+  PC2 = principal_components[, 2],
+  PC3 = principal_components[, 3],
+  PC4 = principal_components[, 4],
+  PC5 = principal_components[, 5],
+  PC6 = principal_components[, 6],
+  PC7 = principal_components[, 7],
+  PC8 = principal_components[, 8],
+  PC9 = principal_components[, 9],
+  PC10 = principal_components[, 10],
+  PC11 = principal_components[, 11],
+  PC12 = principal_components[, 12],
+  PC13 = principal_components[, 13],
+  PC14 = principal_components[, 14],
+  PC15 = principal_components[, 15],
+  PC16 = principal_components[, 16],
+  PC17 = principal_components[, 17],
+  PC18 = principal_components[, 18],
+  PC19 = principal_components[, 19],
+  PC20 = principal_components[, 20],
+  PC21 = principal_components[, 21],
+  PC22 = principal_components[, 22],
+  PC23 = principal_components[, 23],
+  PC24 = principal_components[, 24],
+  PC25 = principal_components[, 25],
+  PC26 = principal_components[, 26],
+  PC27 = principal_components[, 27],
+  PC28 = principal_components[, 28],
+  PC29 = principal_components[, 29],
+  PC30 = principal_components[, 30],
+  PC31 = principal_components[, 31],
+  PC32 = principal_components[, 32],
+  PC33 = principal_components[, 33]
+)
+
+# Fit a linear regression model using the principal components
+model <- lm(Y ~ ., data = pca_data_frame)
+summary(model)
+```
+
+
+```{r}
+#### Training and testing#########
+
+train <-subset(train_data_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_response <- subset(train_data_Lin, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test <- subset(test_data_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test_response <- subset(test_data_Lin, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+train_data_CL_COPD <-subset(train_data_Lin, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_data_CL_PA <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_data_CL_AA <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer))
+train_data_CL_LC <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Adult.Asthma))
+train_data_CL_CLD <-subset(train_data_Lin, select = -c(Prevalence.COPD, Prevalence.Pediatric.Asthma, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+
+######Get the step models 
+
+########COPD
+backward_copd <- step(COPD2, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_vs), "term.labels")
+new_data_selected <- train_data_CL_COPD[, selected_variables]
+# Use selected variables in a new modeling attempt to see R squared improvement
+backward_copd_model_train <- lm((log(train_data_CL_COPD$Prevalence.COPD))^2 ~ ., data = new_data_selected)
+summary(backward_copd_model_train)
+
+predictionsCOPD <- predict(backward_copd_model_train, newdata = test)
+predictions_original_scale <- exp(sqrt(predictionsCOPD))
+
+RMSE(predictions_original_scale,test_response$Prevalence.COPD)
+
+#OG COPD
+
+backward_copd_OG <- step(COPD, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_copd_OG), "term.labels")
+new_data_selected <- train_data_CL_COPD[, selected_variables]
+
+# Use selected variables in a new modeling attempt to see R squared improvement
+backward_copd_model_train_OG <- lm(train_data_CL_COPD$Prevalence.COPD ~ ., data = new_data_selected)
+summary(backward_copd_model_train_OG)
+
+predictionsCOPD <- predict(backward_copd_model_train_OG, newdata = test)
+
+RMSE(predictionsCOPD,test_response$Prevalence.COPD)
+
+mean(test_response$Prevalence.COPD)
+
+
+########CLD
+
+backward_cld <- step(CLD, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_vs), "term.labels")
+new_data_selected <- train_data_CL_CLD[, selected_variables]
+# Use selected variables in a new modeling attempt to see R squared improvement
+backward_cld_model_train <- lm(train_data_CL_CLD$Prevalence.Adult.Chronic.Lung.Disease ~ ., data = new_data_selected)
+summary(backward_cld_model_train)
+
+predictions_cld <- predict(backward_cld_model_train, newdata = test)
+
+RMSE(predictions_cld,test_response$Prevalence.Adult.Chronic.Lung.Disease)
+mean(test_response$Prevalence.Adult.Chronic.Lung.Disease)
+
+########AA
+
+backward_aa <- step(AA, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_vs), "term.labels")
+new_data_selected <- train_data_CL_AA[, selected_variables]
+# Use selected variables in a new modeling attempt to see R squared improvement
+backward_aa_model_train <- lm(train_data_CL_AA$Prevalence.Adult.Asthma ~ ., data = new_data_selected)
+summary(backward_aa_model_train)
+
+predictions_aa <- predict(backward_aa_model_train, newdata = test)
+
+RMSE(predictions_aa,test_response$Prevalence.Adult.Asthma)
+
+
+mean(test_response$Prevalence.Adult.Asthma)
+
+
+########PA
+backward_pa <- step(PA, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_vs), "term.labels")
+new_data_selected <- train_data_CL_PA[, selected_variables]
+# Use selected variables in a new modeling attempt to see R squared improvement
+backward_pa_model_train <- lm(train_data_CL_PA$Prevalence.Pediatric.Asthma ~ ., data = new_data_selected)
+summary(backward_pa_model_train)
+
+predictions_pa <- predict(backward_pa_model_train, newdata = test)
+
+RMSE(predictions_pa,test_response$Prevalence.Pediatric.Asthma)
+
+mean(test_response$Prevalence.Pediatric.Asthma)
+
+mean(test_response$Prevalence.Lung.Cancer)
+
+#best model, get equation and examples
+
+model_tidy <- tidy(backward_copd_model_train_OG)
+model_tidy$estimate
+
+
+predictionsCOPD <- predict(backward_copd_model_train_OG, newdata = test_data_Without_Response_copd)
+
+RMSE(predictionsCOPD,test_data_Response_copd$Prevalence.COPD)
+```
+
+
+```{r}
+#Redo to see without scale
+COPD_NO_0_1_Scale <- lm(DF_Scaled1$Prevalence.COPD~., data = DF_Scaled1)
+set.seed(123)
+#training test
+n <- nrow(DF_Scaled)
+sample_indices <- sample(1:n, size = n, replace = FALSE)
+train_size <- round(0.7 * n)
+test_size <- n - train_size
+train_data2 <- DF_Scaled1[sample_indices[1:train_size], ]
+train_data2 <- subset(train_data2, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test_data2 <- DF_Scaled1[sample_indices[(train_size + 1):n], ]
+test_data2 <- subset(test_data2, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+#backwards
+backward_copd_OG_2 <- step(COPD_NO_0_1_Scale, direction = "backward", trace = 0)
+selected_variables <- attr(terms(backward_copd_OG_2), "term.labels")
+new_data_selected <- DF_Scaled1[, selected_variables]
+
+# Use selected variables in a new modeling attempt to see R squared improvement
+BW_COPD_Scale <- lm(train_data2$Prevalence.COPD ~ ., data = train_data2)
+summary(BW_COPD_Scale)
+
+singlepoint <- data.frame(test_data2[7, ])
+singlepoint
+p <- predict(BW_COPD_Scale, newdata = singlepoint)
+p
+
+p_converted_back_to_OG_scale <- p * scaleList$scale["Prevalence.COPD"] + scaleList$center["Prevalence.COPD"]
+p_converted_back_to_OG_scale
+
+
+Singlepoint_converted_back <- singlepoint$Prevalence.COPD * scaleList$scale["Prevalence.COPD"] + scaleList$center["Prevalence.COPD"]
+Singlepoint_converted_back
+
+#redo coefficients
+model_tidy <- tidy(BW_COPD_Scale)
+model_tidy$estimate
+model_tidy$term
+
+predictionsCOPD <- predict(backward_copd_model_train_OG, newdata = test_data_Without_Response_copd)
+
+RMSE(predictionsCOPD,test_data_Response_copd$Prevalence.COPD)
+```
+
+
+
+```{r}
+#Get together Non-linear modeling data (No scale)
+
+set.seed(123)
+#training test
+n <- nrow(DF)
+sample_indices <- sample(1:n, size = n, replace = FALSE)
+train_size <- round(0.7 * n)
+test_size <- n - train_size
+train_data_NL <- DF[sample_indices[1:train_size], ]
+test_data_NL <- DF[sample_indices[(train_size + 1):n], ]
+
+train_data_NL
+
+#get response
+COPD_Train <-subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+COPD_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+PA_Train <- subset(train_data_NL, select = -c(Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma, Prevalence.COPD))
+PA_Test <- subset(test_data_NL, select = -c(Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma, Prevalence.COPD))
+AA_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.COPD))
+AA_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.COPD))
+CLD_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma, Prevalence.COPD))
+CLD_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma, Prevalence.COPD))
+LC_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease,Prevalence.Adult.Asthma, Prevalence.COPD))
+LC_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease,Prevalence.Adult.Asthma, Prevalence.COPD))
+
+#remove response
+#train_data_NL <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma, Prevalence.COPD))
+
+#test_data_NL <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma, Prevalence.COPD))
+```
+
+
+```{r}
+#### Random Forest
+
+# Fit a Random Forest model
+set.seed(123)  # For reproducibility
+rf_model <- randomForest(CLD_Train$Prevalence.Adult.Chronic.Lung.Disease ~ ., data = CLD_Train, ntree = 100, importance = TRUE)
+
+# Print a summary of the Random Forest model
+print(rf_model)
+
+# Assess variable importance
+var_importance <- round(importance(rf_model), 2)
+sorted_var_importance <- var_importance[order(-var_importance[, 1]), ]
+
+# Print sorted variable importance
+cat("Variable Importance (sorted):\n")
+print(sorted_var_importance)
+
+# Calculate the R-squared value
+
+# Make predictions (change "new_data" to your new data for prediction)
+# new_data <- data.frame(...)  # Replace with your new data
+predictions <- predict(rf_model, newdata = CLD_Test)
+
+Test_observations <- CLD_Test$Prevalence.Adult.Chronic.Lung.Disease
+# Evaluate the model's performance (e.g., using confusion matrix, ROC, etc.)
+# Calculate the R-squared value
+
+rsquared <- R2(pred = predictions, obs = Test_observations)
+print(paste("R-squared:", rsquared))
+
+# RMSE
+RMSE(predictions,Test_observations)
+```
+
+https://www.statology.org/classification-and-regression-trees-in-r/
+
+```{r}
+#Reg Trees
+#LC
+
+#CHANGE THESE VARIABLES ONCE DONE UPDATING
+RT_Limited_Variables_Train <- subset(train_data_NL, select = c(Number.Policy.Passed, Percent.Policy.Passed.Of.All.Proposed, Number.of.Allergen.Species, Smoking.prevalence..as.a.percentage.of.the.population., E_TOTPOP, High.Pollen.State., Percent.Properties.Medium.Or.High.Fire.Risk, EP_UNINSUR, Prevalence.Lung.Cancer))
+
+RT_Limited_Variables_Test <- subset(train_data_NL, select = c(Number.Policy.Passed, Percent.Policy.Passed.Of.All.Proposed, Number.of.Allergen.Species, Smoking.prevalence..as.a.percentage.of.the.population., E_TOTPOP, High.Pollen.State., Percent.Properties.Medium.Or.High.Fire.Risk, EP_UNINSUR, Prevalence.Lung.Cancer))
+
+tree <- rpart(RT_Limited_Variables_Train$Prevalence.Lung.Cancer ~ ., data=RT_Limited_Variables_Train, control=rpart.control(cp=.0001))
+printcp(tree)
+best <- tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"]
+
+#produce a pruned tree based on the best cp value
+pruned_tree <- prune(tree, cp=best)
+
+
+#plot the pruned tree
+prp(pruned_tree,
+    faclen = 0,    # Use full names for factor labels
+    extra = 1,     # Display the number of observations for each terminal node
+    roundint = F,  # Don't round to integers in output
+    digits = 1,    # Display 1 decimal place in output
+    varlen = 20,   # Increase variable name length for readability
+    branch.lty = 2, # Dashed branch lines for better visibility
+    tweak = .4,   # Adjust this value to increase/decrease the font size
+    box.palette = "Blues", # Change the color palette (use a different name or color)
+    yesno = 1,     # Show "yes" or "no" at nodes
+    type = 2,      # Use "compact" format
+    cex = 0.8,     # Adjust this value to increase/decrease the font size
+    mar = c(0, 0, 2, 0), # Adjust the plot margins as needed
+    main = "Pruned Regression Tree") # Set a main title for the plot
+
+# Calculate the R-squared value
+
+# Make predictions (change "new_data" to your new data for prediction)
+# new_data <- data.frame(...)  # Replace with your new data
+predictions <- predict(pruned_tree, newdata = LC_Test)
+
+Test_observations <- LC_Test$Prevalence.Lung.Cancer
+# Evaluate the model's performance (e.g., using confusion matrix, ROC, etc.)
+# Calculate the R-squared value
+
+rsquared <- R2(pred = predictions, obs = Test_observations)
+print(paste("R-squared:", rsquared))
+
+# RMSE
+RMSE(predictions,Test_observations)
+
+
+```
+
+http://www.sthda.com/english/wiki/wiki.php?id_contents=7940
+https://rpubs.com/corey_sparks/539484
+
+```{r}
+############Clustering###########
+#Data does need to be scaled
+DF_No_Predictors <- subset(DF, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+Predictors <- subset(DF, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+DF_Clustering <- scale(DF_No_Predictors, center=TRUE, scale=TRUE)
+colnames(DF_Clustering) <- colnames(DF_No_Predictors)
+
+DF_Clustering_Final <- cbind(DF_Clustering, Predictors)
+
+set.seed(123)
+#training test
+n <- nrow(DF)
+sample_indices <- sample(1:n, size = n, replace = FALSE)
+train_size <- round(0.7 * n)
+test_size <- n - train_size
+train_data_CL <- DF_Clustering_Final[sample_indices[1:train_size], ]
+test_data_CL <- DF_Clustering_Final[sample_indices[(train_size + 1):n], ]
+
+train <-subset(train_data_CL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+train_response <- subset(train_data_CL, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test <- subset(test_data_CL, select = -c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+test_response <- subset(test_data_CL, select = c(Prevalence.Pediatric.Asthma, Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+
+# Set the number of clusters (e.g., k = 3)
+k <- 5
+
+# Run k-means clustering
+kmeans_result <- kmeans(train, centers = k, nstart = 25)  # nstart controls the number of initial random configurations
+
+# Get cluster assignments for each data point
+cluster_assignments <- kmeans_result$cluster
+
+# View cluster assignments
+print(cluster_assignments)
+
+cluster_df <- data.frame(Cluster = cluster_assignments, Response = train_response)
+library(ggplot2)
+
+ggplot(cluster_df, aes(x = Cluster, y = train_response$Prevalence.COPD, color = as.factor(Cluster))) +
+  geom_jitter(width = 0.2) +  # Add jitter to points for better visibility
+  labs(x = "Cluster", y = "Response Variable") +
+  ggtitle("Cluster Assignments vs. Response Variable")
+
+
+test_clusters <- kmeans(test, centers = kmeans_result$centers, nstart = 25)
+test_cluster_assignments <- test_clusters$cluster
+cluster_df2 <- data.frame(Cluster = test_cluster_assignments, Response = test_response)
+
+ggplot(cluster_df2, aes(x = test_cluster_assignments, y = test_response$Prevalence.COPD, color = as.factor(Cluster))) +
+  geom_jitter(width = 0.2) +  # Add jitter to points for better visibility
+  labs(x = "Cluster", y = "Response Variable") +
+  ggtitle("Cluster Assignments vs. Response Variable")
+
+
+
+#### DBSCAN
+
+# Install and load the dbscan package
+library(dbscan)
+
+# Assuming your dataset is named "data" and contains the features for clustering
+# Specify your eps and minPts values
+eps <- 3
+minPts <- 2
+
+# Perform DBSCAN clustering
+dbscan_result <- dbscan(train, eps = eps, MinPts = minPts, )
+
+# Access the cluster assignments
+cluster_assignments <- dbscan_result$cluster
+
+cluster_df <- data.frame(Cluster = cluster_assignments, Response = train_response)
+
+ggplot(cluster_df, aes(x = Cluster, y = train_response$Prevalence.Lung.Cancer, color = as.factor(Cluster))) +
+  geom_jitter(width = 0.2) +  # Add jitter to points for better visibility
+  labs(x = "Cluster", y = "Response Variable") +
+  ggtitle("Cluster Assignments vs. Response Variable")
+
+
+```
+
+
+```{r}
+###########Gradient Boosting###########
+
+
+# Define the XGBoost parameters
+params = {
+    'objective': 'reg:squarederror',  # For regression tasks
+    'eval_metric': 'rmse',            # Root Mean Squared Error as the evaluation metric
+    'max_depth': 6,                   # Maximum depth of the tree
+    'learning_rate': 0.1,             # Learning rate
+    'n_estimators': 100,              # Number of boosting rounds (trees)
+    'subsample': 0.8,                # Fraction of samples used for tree building
+    'colsample_bytree': 0.8,         # Fraction of features used for tree building
+    'random_state': 42               # Random seed for reproducibility
+}
+
+```
+
+
+```{r}
+###########Gradient Boosting###########
+
+set.seed(123)
+#training test
+n <- nrow(DF)
+sample_indices <- sample(1:n, size = n, replace = FALSE)
+train_size <- round(0.7 * n)
+test_size <- n - train_size
+train_data_NL <- DF[sample_indices[1:train_size], ]
+test_data_NL <- DF[sample_indices[(train_size + 1):n], ]
+
+#get data split apart
+COPD_Train <-subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+COPD_Train_response <-subset(train_data_NL, select = c(Prevalence.COPD))
+
+COPD_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+COPD_Test_response <- subset(test_data_NL, select = c(Prevalence.COPD))
+
+
+PA_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+PA_Train_response <-subset(train_data_NL, select = c(Prevalence.Pediatric.Asthma))
+PA_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+PA_Test_response <-subset(test_data_NL, select = c(Prevalence.Pediatric.Asthma))
+
+
+AA_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+AA_Train_response<-subset(train_data_NL, select = c(Prevalence.Adult.Asthma))
+AA_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+AA_Test_response<-subset(test_data_NL, select = c(Prevalence.Adult.Asthma))
+
+CLD_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+CLD_Train_response<-subset(train_data_NL, select = c(Prevalence.Adult.Chronic.Lung.Disease))
+CLD_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+CLD_Test_response<-subset(test_data_NL, select = c(Prevalence.Adult.Chronic.Lung.Disease))
+
+LC_Train <- subset(train_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+LC_Train_response<-subset(train_data_NL, select = c(Prevalence.Lung.Cancer))
+
+LC_Test <- subset(test_data_NL, select = -c(Prevalence.Pediatric.Asthma,Prevalence.COPD, Prevalence.Adult.Chronic.Lung.Disease, Prevalence.Lung.Cancer, Prevalence.Adult.Asthma))
+LC_Test_response<-subset(test_data_NL, select = c(Prevalence.Lung.Cancer))
+```
+
+
+```{r}
+# Define the XGBoost parameters
+params <- list(
+  objective = 'reg:squarederror',
+  eval_metric = 'rmse',
+  max_depth = 6,
+  learning_rate = 0.1,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  random_state = 42
+)
+```
+
+
+```{r}
+X_train <- as.matrix(COPD_Train)
+y_train <- as.matrix(COPD_Train_response$Prevalence.COPD)
+xgb_model <- xgboost(data = X_train, label = y_train, params = params, nrounds = 200)
+
+
+X_test <- as.matrix(COPD_Test)
+y_test <- as.matrix(COPD_Test_response$Prevalence.COPD)
+
+# Make predictions on the test data
+predictions <- predict(xgb_model, newdata=X_test)
+
+# Calculate RMSE and R-squared
+rmse <- RMSE(predictions,y_test)
+r2 = R2(y_test, predictions)
+
+print(rmse)
+print(r2)
+```
+
+
+```{r}
+#######Gain represents fractional contribution of each feature to the model based on the total gain of this feature's splits. Higher percentage means a more important predictive feature.
+
+importance_scores <- xgb.importance(model = xgb_model)
+importance_df <- as.data.frame(importance_scores)
+excel_file_path <- "Gradient_Boost_Feature_Importance_COPD.xlsx"
+write_xlsx(importance_df, path = excel_file_path)
+```
+
+
+```{r}
+
+
+
+
+```
+
+
